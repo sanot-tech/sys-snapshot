@@ -1,1 +1,13 @@
 /target
+**/*.rs.bk
+
+# The snapshot store must never end up in the repository, and must never be
+# committed if someone runs the tool from a checkout directory.
+/.snapshots/
+snapshots/
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store

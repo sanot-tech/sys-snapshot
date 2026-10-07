@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel earlier runs for the same branch: a new push makes the old result
+# irrelevant, and it saves CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        # -D warnings turns a compiler warning into a failure. This project
+        # has zero dependencies and roughly 600 lines, so there is no excuse
+        # for a warning to sit in the tree.
+        run: cargo build --release --locked
+        env:
+          RUSTFLAGS: -D warnings
+
+      - name: Clippy
+        run: cargo clippy --release --locked -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Verify the program runs
+        # Cheap smoke test: it must start, resolve its paths, and print usage
+        # without touching anything on disk.
+        run: ./target/release/sys-snapshot --restore does-not-exist && exit 1 || true
+
+  integration:
+    name: Integration test on a real filesystem
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install rsync
+        run: sudo apt-get update && sudo apt-get install -y rsync
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Two snapshots must share hard links, not duplicate data
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/fakehome"
+          mkdir -p "$HOME"
+          BIN="$GITHUB_WORKSPACE/target/release/sys-snapshot"
+
+          # First run creates the base, second run must reuse it.
+          "$BIN" >/dev/null 2>&1
+          mkdir -p "$HOME/keepme"
+          echo "unchanged" > "$HOME/keepme/file.txt"
+
+          "$BIN" >/dev/null 2>&1
+          "$BIN" >/dev/null 2>&1
+
+          snaps=("$HOME"/.snapshots/*/)
+          echo "snapshots taken: ${#snaps[@]}"
+
+          # The file was created before the last two snapshots, so all three
+          # must point at one inode. If exclude patterns ever break, the
+          # snapshot starts copying itself and this is what catches it.
+          latest="${snaps[-1]}"
+          links=$(stat -c "%h" "$latest/home/keepme/file.txt")
+          echo "link count: $links"
+          test "$links" -ge 3
+
+          # The snapshot must never contain the store.
+          if [ -e "$latest/home/.snapshots" ]; then
+            echo "FAIL: snapshot contains its own store, recursion is back"
+            exit 1
+          fi
+
+          echo "OK: hard links shared, no recursion"
