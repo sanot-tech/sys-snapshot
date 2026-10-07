@@ -61,36 +61,56 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-      - name: Two snapshots must share hard links, not duplicate data
+      - name: Three snapshots must share hard links, not duplicate data
         run: |
           set -euo pipefail
           export HOME="$RUNNER_TEMP/fakehome"
           mkdir -p "$HOME"
           BIN="$GITHUB_WORKSPACE/target/release/sys-snapshot"
 
-          # First run creates the base, second run must reuse it.
+          # First run has no base, so it is a full copy.
           "$BIN" >/dev/null 2>&1
+
+          # File created now, so it lands in every snapshot taken afterwards.
           mkdir -p "$HOME/keepme"
-          echo "unchanged" > "$HOME/keepme/file.txt"
+          echo "unchanged content" > "$HOME/keepme/file.txt"
 
+          # Two more snapshots, unchanged file in between.
           "$BIN" >/dev/null 2>&1
           "$BIN" >/dev/null 2>&1
 
-          snaps=("$HOME"/.snapshots/*/)
+          mapfile -t snaps < <(find "$HOME/.snapshots" -mindepth 1 -maxdepth 1 -type d | sort)
           echo "snapshots taken: ${#snaps[@]}"
+          # Snapshot names are second-resolution timestamps. Three runs can
+          # easily land inside two seconds, which is exactly the collision
+          # this test found, so assert the runs produced distinct snapshots.
+          test "${#snaps[@]}" -eq 3
 
-          # The file was created before the last two snapshots, so all three
-          # must point at one inode. If exclude patterns ever break, the
-          # snapshot starts copying itself and this is what catches it.
+          # The file exists in the last two snapshots and is unchanged between
+          # them, so those two must share one inode: a link count of 2.
+          # (The live file in $HOME is a separate inode and does not count.)
           latest="${snaps[-1]}"
+          prev="${snaps[-2]}"
+          a=$(stat -c "%i" "$prev/home/keepme/file.txt")
+          b=$(stat -c "%i" "$latest/home/keepme/file.txt")
           links=$(stat -c "%h" "$latest/home/keepme/file.txt")
-          echo "link count: $links"
-          test "$links" -ge 3
+          echo "inode prev=$a latest=$b links=$links"
 
-          # The snapshot must never contain the store.
-          if [ -e "$latest/home/.snapshots" ]; then
-            echo "FAIL: snapshot contains its own store, recursion is back"
+          if [ "$a" != "$b" ]; then
+            echo "FAIL: unchanged file was copied again instead of hard linked"
+            exit 1
+          fi
+          if [ "$links" -lt 2 ]; then
+            echo "FAIL: expected the two snapshots to share one inode"
             exit 1
           fi
 
-          echo "OK: hard links shared, no recursion"
+          # A snapshot must never contain the store itself.
+          for s in "${snaps[@]}"; do
+            if [ -e "$s/home/.snapshots" ]; then
+              echo "FAIL: $s contains its own store, recursion is back"
+              exit 1
+            fi
+          done
+
+          echo "OK: hard links shared across snapshots, no recursion"

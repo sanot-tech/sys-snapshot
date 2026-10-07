@@ -371,22 +371,48 @@ fn take_snapshot() -> i32 {
         return 1;
     }
 
-    let id = snapshot_id();
-    let dest = root.join(&id);
+    // A snapshot name is a timestamp with one-second resolution, so two runs
+    // inside the same second would pick the same directory and the second run
+    // would write into the first one's data. Worse, the second run would then
+    // also find itself as its own --link-dest. Found by the integration test
+    // on CI, where three quick runs collided.
+    //
+    // Appending a counter keeps every snapshot distinct and keeps the names
+    // sortable, since "-2" sorts after the plain name.
+    let mut id = snapshot_id();
+    let mut dest = root.join(&id);
+    let mut n = 2;
+    while dest.exists() {
+        id = format!("{}-{}", snapshot_id(), n);
+        dest = root.join(&id);
+        n += 1;
+        if n > 1000 {
+            err("cannot find an unused snapshot name");
+            return 1;
+        }
+    }
+
     if let Err(e) = fs::create_dir_all(&dest) {
         err(&format!("cannot create {}: {e}", dest.display()));
         return 1;
     }
     step("snap", &format!("{id} -> {}", dest.display()));
 
-    // Find the previous snapshot. rsync's --link-dest reuses files from it
-    // that have not changed. That is what makes snapshots incremental:
-    // we only pay for the difference.
+    // Find the previous snapshot. rsync's --link-dest reuses files from it that
+    // have not changed, which is what makes snapshots incremental: we pay
+    // only for the difference.
+    //
+    // The destination must be excluded explicitly, because the directory was
+    // already created above and so it is in this listing. Pointing --link-dest
+    // at the empty directory we are about to fill makes every file copy
+    // again instead of hard linking, which silently turns every snapshot
+    // into a full copy. That regression was caught by the CI integration
+    // test, which asserts shared inodes between consecutive snapshots.
     let existing = list_snapshots();
     let prev = existing
         .iter()
         .rev()
-        .find(|(n, _)| *n != id)
+        .find(|(_, p)| p != &dest)
         .map(|(_, p)| p.clone());
 
     match &prev {
