@@ -101,14 +101,40 @@ const WATCH_SYSTEM: &[(&str, &str)] = &[
     ("pacman", "/var/lib/pacman"),
 ];
 
-/// Number of snapshots to keep. 24 hourly snapshots is roughly one day.
-const KEEP_SNAPSHOTS: usize = 24;
+/// Number of snapshots to keep.
+///
+/// Was 24, on the reasoning that 24 hourly snapshots is roughly one day of
+/// rollback. That reasoning ignores what a snapshot costs.
+///
+/// Measured on this machine: each hourly snapshot consumes roughly 4.7 GB, so
+/// a day of history is about 110 GB on a 117 GB filesystem. The retention was
+/// not "one day of rollback", it was "one day until the disk is full and the
+/// machine cannot boot". It filled on its own, without any of the build activity
+/// that could reasonably be blamed for it.
+///
+/// 6 keeps six hours of hourly history -- long enough to cover a working
+/// session and a night's sleep -- at about 28 GB, which leaves room for a
+/// Rust build target, package caches and whatever else the machine is doing.
+///
+/// The real fix is not this constant. It is [`MIN_FREE_MB`] below, which is
+/// checked on every run and is what actually stops the disk filling. Retention
+/// only decides how much history survives once that guard holds.
+const KEEP_SNAPSHOTS: usize = 6;
 
 /// Skip the snapshot when free space drops below this, in megabytes.
 ///
 /// A snapshot that fills the disk is worse than no snapshot at all: it can
-/// leave the machine unable to boot.
-const MIN_FREE_MB: u64 = 2_000;
+/// leave the machine unable to boot. That part was always right.
+///
+/// What was wrong was the size. 2 GB looked like a comfortable margin and is
+/// less than half a single snapshot here. The guard could therefore be satisfied
+/// by the state *before* a run and still be violated by the run itself: rsync
+/// writes ~4.7 GB before pruning gets a chance to remove anything, because
+/// pruning happens after the snapshot is taken.
+///
+/// 15 GB is now roughly three snapshots of headroom, which means the guard
+/// survives the run that trips it rather than merely being true on entry.
+const MIN_FREE_MB: u64 = 15_000;
 
 /// Lock file preventing two snapshots from running at once.
 const LOCK_FILE: &str = "/tmp/sys-snapshot.lock";
